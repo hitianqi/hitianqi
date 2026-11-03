@@ -168,7 +168,9 @@ def stats(t, data):
         w = bw * share
         segs.append(f'<rect x="{x:.1f}" y="52" width="{max(w - 2, 1):.1f}" height="8" rx="2" fill="{color}"/>')
         x += w
-        text = f"{name} {share * 100:.0f}%"
+        if name == "Other":
+            continue
+        text =f"{name} {share * 100:.0f}%"
         width = 14 + len(text) * 6.5
         if lx + width > bx + bw:
             lx, ly = bx, ly + 22
