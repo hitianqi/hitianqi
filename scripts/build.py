@@ -1,30 +1,44 @@
-"""Render the profile header and stats strip as light and dark SVGs into assets/."""
+"""Render the profile README's neofetch-style terminal as assets/neofetch.svg."""
 
+import base64
 import json
 import os
 import urllib.request
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from xml.sax.saxutils import escape
 
 LOGIN = os.environ.get("LOGIN", "hitianqi")
 TOKEN = os.environ["GH_TOKEN"]
+HERE = os.path.dirname(os.path.abspath(__file__))
 # Notebook bytes are mostly cell output, not code.
 SKIP_LANGUAGES = {"Jupyter Notebook"}
+SHORT = {"JavaScript": "JS", "Jupyter Notebook": "Jupyter"}
 
-SANS = "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Inter, 'Helvetica Neue', Arial, sans-serif"
-MONO = "ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace"
-EASE = "cubic-bezier(.22,1,.36,1)"
+COLS, CW, LH, FS = 90, 8.4, 20, 14
+PAD, TITLE, TOP = 24, 36, 18
+INFO_COL = 38
+HEAT_STATS_COL = 57
 
-THEMES = {
-    "light": dict(panel="#f6f6f7", ink="#0b0b0d", muted="#6b6b74", faint="#a3a3ab",
-                  ring="rgba(0,0,0,.06)", window="#ffffff", chrome="#e6e6e9",
-                  wash_a="#8b7bff", wash_b="#ffb08a", wash_op=".5"),
-    "dark": dict(panel="#0e0f13", ink="#f2f2f4", muted="#9b9ba5", faint="#5d5d68",
-                 ring="rgba(255,255,255,.07)", window="#16171c", chrome="#2a2b32",
-                 wash_a="#6d5cff", wash_b="#ff8a5c", wash_op=".42"),
-}
-STATE = {"passed": "#22c55e", "working": "#3b82f6", "waiting": "#f59e0b"}
+C = dict(bg="#0b0d10", title="#12151a", ring="#ffffff14", fg="#c8ccd4", dim="#5c6370",
+         key="#7aa2f7", user="#ff9e64", ok="#9ece6a", empty="#1a1e24")
+HEAT = ["#0e4429", "#006d32", "#26a641", "#39d353"]
+LOGO_FROM, LOGO_TO = (0xff, 0x9e, 0x64), (0xbb, 0x9a, 0xf7)
+SWATCHES = [["#15161e", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#a9b1d6"],
+            ["#414868", "#ff7a93", "#b9f27c", "#ff9e64", "#7da6ff", "#c0a8ff", "#0db9d7", "#c0caf5"]]
+
+# "TZ" in JetBrains Mono ExtraBold, rasterised once onto a 35x10 character grid.
+LOGO = """\
+@@@@@@@@@@@@@@@@#   :@@@@@@@@@@@@@*
+%%%%%%@@@@@%%%%%*   :%%%%%%%%@@@@@*
+     .@@@@#                 *@@@@*.
+      @@@@#               :%@@@@=
+      @@@@#              +@@@@#.
+      @@@@#            .#@@@@+
+      @@@@#           -@@@@%:
+      @@@@#          *@@@@*.
+      @@@@#         +@@@@@%%%%%%%%%
+      @@@@#         +@@@@@@@@@@@@@@""".split("\n")
 
 
 def graphql(query):
@@ -49,14 +63,16 @@ def fetch():
         nodes {{ languages(first: 10, orderBy: {{field: SIZE, direction: DESC}}) {{
           edges {{ size node {{ name color }} }} }} }}
       }}
+      contributionsCollection {{ contributionCalendar {{
+        totalContributions weeks {{ contributionDays {{ date contributionCount }} }} }} }}
     }} }}""")
 
-    start = datetime.fromisoformat(user["createdAt"].replace("Z", "+00:00")).year
+    created = datetime.fromisoformat(user["createdAt"].replace("Z", "+00:00"))
     now = datetime.now(timezone.utc)
     years = "\n".join(
         f'y{y}: contributionsCollection(from: "{y}-01-01T00:00:00Z", to: "{min(now.isoformat(), f"{y}-12-31T23:59:59+00:00")}")'
         " { totalCommitContributions restrictedContributionsCount }"
-        for y in range(start, now.year + 1)
+        for y in range(created.year, now.year + 1)
     )
     per_year = graphql(f'{{ user(login: "{LOGIN}") {{ {years} }} }}')
     commits = sum(c["totalCommitContributions"] + c["restrictedContributionsCount"] for c in per_year.values())
@@ -67,141 +83,215 @@ def fetch():
             name = edge["node"]["name"]
             if name not in SKIP_LANGUAGES:
                 sizes[name] += edge["size"]
-                colors[name] = edge["node"]["color"] or "#8b8b94"
+                colors[name] = edge["node"]["color"] or C["fg"]
     total = sum(sizes.values()) or 1
-    top = [(n, s / total, colors[n]) for n, s in sizes.most_common(4)]
-    rest = 1 - sum(share for _, share, _ in top)
-    if rest >= 0.005:
-        top.append(("Other", rest, None))
 
-    return dict(commits=commits, prs=user["pullRequests"]["totalCount"],
-                repos=user["repositories"]["totalCount"], languages=top)
-
-
-def style(t):
-    return f"""<style>
-  .sans {{ font-family: {SANS}; }}
-  .mono {{ font-family: {MONO}; }}
-  .num {{ font-variant-numeric: tabular-nums; }}
-  .in {{ opacity: 0; animation: in .5s {EASE} forwards; }}
-  @keyframes in {{ from {{ opacity: 0; transform: translateY(6px); }} to {{ opacity: 1; transform: none; }} }}
-  @media (prefers-reduced-motion: reduce) {{ .in {{ animation: none; opacity: 1; }} }}
-</style>"""
-
-
-def hero(t):
-    rows = [("planner", "plan approved, 4 steps", "passed"),
-            ("builder", "editing panel.ts", "working"),
-            ("reviewer", "waiting for you", "waiting")]
-    wx, wy, ww, wh = 492, 40, 348, 200
-    row_svg = "".join(
-        f'<g class="in" style="animation-delay:{.35 + i * .12:.2f}s">'
-        f'<circle cx="{wx + 22}" cy="{wy + 64 + i * 30}" r="4" fill="{STATE[state]}"/>'
-        f'<text x="{wx + 36}" y="{wy + 68 + i * 30}" class="mono" font-size="12" fill="{t["ink"]}">{role}</text>'
-        f'<text x="{wx + 118}" y="{wy + 68 + i * 30}" class="mono" font-size="12" fill="{t["muted"]}">{escape(text)}</text></g>'
-        for i, (role, text, state) in enumerate(rows)
-    )
-    done = "3 branches merged"
-    char = 7.22  # 12px mono advance
-    steps = len(done) + 2
-    widths = ";".join(f"{i * char:.1f}" for i in range(steps + 1))
-    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="880" height="280" viewBox="0 0 880 280" role="img" aria-label="Tianqi Zhao, AI engineer at Prover">
-{style(t)}
-<defs>
-  <radialGradient id="wa"><stop offset="0" stop-color="{t['wash_a']}" stop-opacity="{t['wash_op']}"/><stop offset="1" stop-color="{t['wash_a']}" stop-opacity="0"/></radialGradient>
-  <radialGradient id="wb"><stop offset="0" stop-color="{t['wash_b']}" stop-opacity="{t['wash_op']}"/><stop offset="1" stop-color="{t['wash_b']}" stop-opacity="0"/></radialGradient>
-  <clipPath id="panel"><rect width="880" height="280" rx="20"/></clipPath>
-  <clipPath id="type"><rect x="{wx + 18}" y="{wy + wh - 34}" height="20" width="0">
-    <animate attributeName="width" values="{widths}" dur=".9s" begin="1.1s" calcMode="discrete" fill="freeze"/>
-  </rect></clipPath>
-</defs>
-<g clip-path="url(#panel)">
-  <rect width="880" height="280" fill="{t['panel']}"/>
-  <circle cx="650" cy="250" r="280" fill="url(#wa)"/>
-  <circle cx="850" cy="40" r="230" fill="url(#wb)"/>
-</g>
-<rect x=".5" y=".5" width="879" height="279" rx="19.5" fill="none" stroke="{t['ring']}"/>
-
-<g class="in">
-  <text x="48" y="76" class="mono" font-size="11" letter-spacing="1.4" fill="{t['faint']}">STOCKHOLM, SWEDEN</text>
-  <text x="45" y="138" class="sans" font-size="54" font-weight="500" letter-spacing="-2.2" fill="{t['ink']}">Tianqi Zhao</text>
-</g>
-<g class="in" style="animation-delay:.12s">
-  <text x="48" y="180" class="sans" font-size="20" letter-spacing="-.3" fill="{t['ink']}">AI engineer at Prover.</text>
-  <text x="48" y="208" class="sans" font-size="20" letter-spacing="-.3" fill="{t['muted']}">Building tools for coding agents</text>
-  <text x="48" y="234" class="sans" font-size="20" letter-spacing="-.3" fill="{t['muted']}">you can actually watch.</text>
-</g>
-
-<g class="in" style="animation-delay:.2s">
-  <rect x="{wx}" y="{wy}" width="{ww}" height="{wh}" rx="12" fill="{t['window']}"/>
-  <rect x="{wx + .5}" y="{wy + .5}" width="{ww - 1}" height="{wh - 1}" rx="11.5" fill="none" stroke="{t['ring']}"/>
-  <circle cx="{wx + 18}" cy="{wy + 17}" r="4.5" fill="{t['chrome']}"/>
-  <circle cx="{wx + 33}" cy="{wy + 17}" r="4.5" fill="{t['chrome']}"/>
-  <circle cx="{wx + 48}" cy="{wy + 17}" r="4.5" fill="{t['chrome']}"/>
-  <text x="{wx + ww / 2}" y="{wy + 21}" text-anchor="middle" class="mono" font-size="11" fill="{t['faint']}">agents · 3 roles</text>
-  <line x1="{wx}" x2="{wx + ww}" y1="{wy + 34.5}" y2="{wy + 34.5}" stroke="{t['ring']}"/>
-  <line x1="{wx + 18}" x2="{wx + ww - 18}" y1="{wy + wh - 46.5}" y2="{wy + wh - 46.5}" stroke="{t['ring']}"/>
-</g>
-{row_svg}
-<g clip-path="url(#type)">
-  <text x="{wx + 18}" y="{wy + wh - 20}" class="mono" font-size="12" fill="{STATE['passed']}">✓ <tspan fill="{t['muted']}">{done}</tspan></text>
-</g>
-</svg>
-"""
-
-
-def stats(t, data):
-    numbers = [(f"{data['commits']:,}", "commits"), (f"{data['prs']:,}", "pull requests"),
-               (str(data["repos"]), "repositories")]
-    num_svg = "".join(
-        f'<g class="in" style="animation-delay:{i * .1:.1f}s">'
-        f'<text x="{4 + i * 150}" y="60" class="sans num" font-size="46" font-weight="300" letter-spacing="-1.5" fill="{t["ink"]}">{value}</text>'
-        f'<text x="{6 + i * 150}" y="88" class="sans" font-size="13" fill="{t["muted"]}">{label}</text></g>'
-        for i, (value, label) in enumerate(numbers)
+    cal = user["contributionsCollection"]["contributionCalendar"]
+    return dict(
+        created=created, now=now, commits=commits,
+        prs=user["pullRequests"]["totalCount"], repos=user["repositories"]["totalCount"],
+        languages=[(n, s / total, colors[n]) for n, s in sizes.most_common(4)],
+        contributions=cal["totalContributions"],
+        weeks=[[(date.fromisoformat(d["date"]), d["contributionCount"]) for d in w["contributionDays"]] for w in cal["weeks"]],
     )
 
-    bx, bw = 500, 376
-    segs, labels, x = [], [], bx
-    lx, ly = bx, 98
-    for name, share, color in data["languages"]:
-        color = color or t["chrome"]
-        w = bw * share
-        segs.append(f'<rect x="{x:.1f}" y="52" width="{max(w - 2, 1):.1f}" height="8" rx="2" fill="{color}"/>')
-        x += w
-        if name == "Other":
-            continue
-        text =f"{name} {share * 100:.0f}%"
-        width = 14 + len(text) * 6.5
-        if lx + width > bx + bw:
-            lx, ly = bx, ly + 22
-        labels.append(f'<circle cx="{lx + 4}" cy="{ly - 4}" r="3.5" fill="{color}"/>'
-                      f'<text x="{lx + 13}" y="{ly}" class="sans" font-size="13" fill="{t["muted"]}">'
-                      f'{escape(name)} <tspan class="num" fill="{t["faint"]}">{share * 100:.0f}%</tspan></text>')
-        lx += width + 10
 
-    height = ly + 14
-    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="880" height="{height}" viewBox="0 0 880 {height}" role="img" aria-label="{data['commits']} commits, {data['prs']} pull requests">
-{style(t)}
-<defs><clipPath id="grow"><rect x="{bx}" y="48" height="16" width="0">
-  <animate attributeName="width" from="0" to="{bw}" dur=".9s" begin=".2s" fill="freeze" calcMode="spline" keyTimes="0;1" keySplines=".22 1 .36 1"/>
-</rect></clipPath></defs>
-{num_svg}
-<text x="{bx}" y="30" class="mono" font-size="11" letter-spacing="1.4" fill="{t['faint']}">LANGUAGES</text>
-<g clip-path="url(#grow)">{''.join(segs)}</g>
-<g class="in" style="animation-delay:.5s">{''.join(labels)}</g>
+# --- small helpers -----------------------------------------------------------
+
+def x(col):
+    return PAD + col * CW
+
+
+def y(row):
+    return TITLE + TOP + row * LH + 15
+
+
+def mix(a, b, t):
+    return "#" + "".join(f"{round(a[i] + (b[i] - a[i]) * t):02x}" for i in range(3))
+
+
+def readable(hex_colour):
+    """Lighten a language colour until it reads on the dark background."""
+    rgb = tuple(int(hex_colour[i:i + 2], 16) for i in (1, 3, 5))
+    t = 0.0
+    while t < 1:
+        r, g, b = (c + (255 - c) * t for c in rgb)
+        if 0.2126 * r + 0.7152 * g + 0.0722 * b >= 110:
+            break
+        t += 0.1
+    return mix(rgb, (255, 255, 255), t)
+
+
+def span(text, colour=None, bold=False):
+    attrs = (f' fill="{colour}"' if colour else "") + (' font-weight="700"' if bold else "")
+    return f"<tspan{attrs}>{escape(text)}</tspan>"
+
+
+def line(row, col, parts, delay):
+    return f'<text x="{x(col):.1f}" y="{y(row)}" class="ln" style="animation-delay:{delay:.2f}s">{"".join(parts)}</text>'
+
+
+def prompt(cmd=""):
+    return [span("tianqi", C["user"], True), span("@github", C["user"]), span(":", C["dim"]),
+            span("~", C["key"]), span("$ ", C["dim"]), span(cmd)]
+
+
+def typed(row, cmd, start, n):
+    """A prompt whose command types out once, one character every 45 ms."""
+    col = len("tianqi@github:~$ ")
+    step = 0.045
+    widths = ";".join(f"{i * CW:.1f}" for i in range(len(cmd) + 1))
+    return (line(row, 0, prompt(), start)
+            + f'<clipPath id="c{n}"><rect x="{x(col):.1f}" y="{y(row) - 15}" height="{LH}" width="0">'
+            f'<animate attributeName="width" values="{widths}" begin="{start:.2f}s" dur="{len(cmd) * step:.2f}s" calcMode="discrete" fill="freeze"/>'
+            f'</rect></clipPath><g clip-path="url(#c{n})"><text x="{x(col):.1f}" y="{y(row)}">{escape(cmd)}</text></g>',
+            start + len(cmd) * step + 0.25)
+
+
+def streaks(days):
+    longest = run = 0
+    for _, n in days:
+        run = run + 1 if n else 0
+        longest = max(longest, run)
+    current = 0
+    for i, (_, n) in enumerate(reversed(days)):
+        if n:
+            current += 1
+        elif i:  # today may still be empty
+            break
+    return longest, current
+
+
+# --- the picture -------------------------------------------------------------
+
+def render(d):
+    out, t = [], 0.2
+    cmd, t = typed(0, "neofetch", t, 1)
+    out.append(cmd)
+
+    # logo
+    for i, row in enumerate(LOGO):
+        out.append(line(2 + i, 0, [span(row, mix(LOGO_FROM, LOGO_TO, i / (len(LOGO) - 1)), True)], t + i * 0.02))
+
+    # info
+    months = (d["now"].year - d["created"].year) * 12 + d["now"].month - d["created"].month - (d["now"].day < d["created"].day)
+    uptime = ", ".join(f"{n} {u}{'s' if n != 1 else ''}" for n, u in ((months // 12, "year"), (months % 12, "month")) if n)
+    langs = []
+    for name, share, colour in d["languages"]:
+        langs += [span(SHORT.get(name, name), readable(colour)), span(f" {share * 100:.0f}%  ", C["dim"])]
+
+    kv = lambda k, *v: [span(k.ljust(10), C["key"], True), *v]
+    info = [
+        [span("tianqi", C["user"], True), span("@", C["dim"]), span("github", C["user"], True)],
+        [span("─" * 13, C["dim"])],
+        kv("Role", span("AI Engineer @ Prover")),
+        kv("Location", span("Stockholm, Sweden")),
+        kv("Uptime", span(uptime)),
+        kv("Repos", span(str(d["repos"]))),
+        kv("Commits", span(f"{d['commits']:,}")),
+        kv("PRs", span(f"{d['prs']:,}")),
+        kv("Langs", *langs),
+        kv("Building", span("tools for coding agents")),
+        kv("Web", span("tianqiz.me")),
+        kv("LinkedIn", span("in/terryonzhao")),
+    ]
+    for i, parts in enumerate(info):
+        out.append(line(2 + i, INFO_COL, parts, t + i * 0.02))
+    swatch_row = 2 + len(info) + 1
+    for r, colours in enumerate(SWATCHES):
+        cells = "".join(f'<rect x="{x(INFO_COL + i * 3):.1f}" y="{y(swatch_row + r) - 14}" width="{3 * CW:.1f}" height="{LH - 2}" fill="{c}"/>'
+                        for i, c in enumerate(colours))
+        out.append(f'<g class="ln" style="animation-delay:{t + (len(info) + r) * 0.02:.2f}s">{cells}</g>')
+    t += 0.6
+
+    # contributions
+    row = swatch_row + 3
+    cmd, t = typed(row, "git contrib --since=1.year", t, 2)
+    out.append(cmd)
+    weeks = d["weeks"]
+    nonzero = sorted(n for w in weeks for _, n in w if n)
+    cuts = [nonzero[int((len(nonzero) - 1) * f)] for f in (.25, .5, .75)] if nonzero else [1, 1, 1]
+    level = lambda n: 0 if n == 0 else 1 + sum(n > c for c in cuts)
+
+    labels, last = [], -9
+    for i, w in enumerate(weeks):
+        first = w[0][0]
+        if (i == 0 or first.month != weeks[i - 1][0][0].month) and i - last >= 5 and i + 3 <= len(weeks):
+            labels.append(f'<text x="{x(i):.1f}" y="{y(row + 1)}" fill="{C["dim"]}">{first.strftime("%b")}</text>')
+            last = i
+    out.append(f'<g class="ln" style="animation-delay:{t:.2f}s">{"".join(labels)}</g>')
+
+    top = y(row + 2) - 15
+    for i, w in enumerate(weeks):
+        cells = "".join(
+            f'<rect x="{x(i) + .5:.1f}" y="{top + wd * 10 + .5:.1f}" width="{CW - 1.4:.1f}" height="9" rx="1.5" '
+            f'fill="{HEAT[level(n) - 1] if n else C["empty"]}"/>'
+            for day, n in w for wd in [(day.isoweekday() % 7)]
+        )
+        out.append(f'<g class="ln" style="animation-delay:{t + i * 0.012:.3f}s">{cells}</g>')
+
+    days = [day for w in weeks for day in w]
+    longest, current = streaks(days)
+    best_day, best = max(days, key=lambda p: p[1])
+    stats = [
+        [span(f"{d['contributions']:,}", C["ok"], True), span(" contributions")],
+        [span("longest streak".ljust(17), C["dim"]), span(f"{longest} days")],
+        [span("current streak".ljust(17), C["dim"]), span(f"{current} day{'s' if current != 1 else ''}")],
+        [span("best day".ljust(17), C["dim"]), span(f"{best_day.strftime('%b')} {best_day.day} · {best}")],
+    ]
+    t2 = t + len(weeks) * 0.012
+    for i, parts in enumerate(stats):
+        out.append(line(row + 2 + i, HEAT_STATS_COL, parts, t2 + i * 0.03))
+
+    legend_row = row + 6
+    legend = [span("less ", C["dim"])]
+    out.append(line(legend_row, 0, legend, t2))
+    out.append(f'<g class="ln" style="animation-delay:{t2:.2f}s">' + "".join(
+        f'<rect x="{x(5 + i) + .5:.1f}" y="{y(legend_row) - 10}" width="{CW - 1.4:.1f}" height="9" rx="1.5" fill="{c}"/>'
+        for i, c in enumerate([C["empty"], *HEAT])) + "</g>")
+    out.append(line(legend_row, 11, [span("more", C["dim"])], t2))
+
+    end = legend_row + 2
+    t2 += 0.3
+    out.append(line(end, 0, prompt(), t2))
+    out.append(f'<rect class="ln" style="animation-delay:{t2:.2f}s" x="{x(17):.1f}" y="{y(end) - 14}" width="{CW:.1f}" height="18" fill="{C["fg"]}"/>')
+
+    rows = end + 1
+    w, h = PAD * 2 + COLS * CW, TITLE + TOP * 2 + rows * LH
+    fonts = "".join(
+        f"@font-face{{font-family:JBM;font-weight:{wt};src:url(data:font/woff;base64,"
+        f"{base64.b64encode(open(os.path.join(HERE, 'fonts', f'jbm-{wt}.woff'), 'rb').read()).decode()}) format('woff')}}"
+        for wt in (400, 700))
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{w:.0f}" height="{h}" viewBox="0 0 {w:.0f} {h}" role="img" aria-label="neofetch for tianqi@github: AI Engineer at Prover, Stockholm. {d['commits']} commits, {d['prs']} pull requests, {d['contributions']} contributions in the last year.">
+<style>
+{fonts}
+text {{ font-family: JBM, ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: {FS}px; fill: {C['fg']}; white-space: pre; }}
+.ln {{ opacity: 0; animation: show .01s step-end forwards; }}
+@keyframes show {{ to {{ opacity: 1; }} }}
+@media (prefers-reduced-motion: reduce) {{ .ln {{ animation: none; opacity: 1; }} }}
+</style>
+<clipPath id="win"><rect width="{w:.0f}" height="{h}" rx="12"/></clipPath>
+<g clip-path="url(#win)">
+  <rect width="{w:.0f}" height="{h}" fill="{C['bg']}"/>
+  <rect width="{w:.0f}" height="{TITLE}" fill="{C['title']}"/>
+</g>
+<rect x=".5" y=".5" width="{w - 1:.0f}" height="{h - 1}" rx="11.5" fill="none" stroke="{C['ring']}"/>
+{''.join(f'<circle cx="{20 + i * 18}" cy="{TITLE / 2}" r="5.5" fill="#2b3038"/>' for i in range(3))}
+<text x="{w / 2:.0f}" y="{TITLE / 2 + 4.5}" text-anchor="middle" font-size="12" fill="{C['dim']}">tianqi@github: ~ — {COLS}×{rows}</text>
+<g xml:space="preserve">
+{chr(10).join(out)}
+</g>
 </svg>
 """
 
 
 def main():
     data = fetch()
-    out = os.path.join(os.path.dirname(__file__), "..", "assets")
+    out = os.path.join(HERE, "..", "assets")
     os.makedirs(out, exist_ok=True)
-    for name, t in THEMES.items():
-        for kind, svg in (("hero", hero(t)), ("stats", stats(t, data))):
-            with open(os.path.join(out, f"{kind}-{name}.svg"), "w") as f:
-                f.write(svg)
-    print(json.dumps(data))
+    with open(os.path.join(out, "neofetch.svg"), "w") as f:
+        f.write(render(data))
+    print(json.dumps({k: data[k] for k in ("commits", "prs", "repos", "contributions")}))
 
 
 if __name__ == "__main__":
